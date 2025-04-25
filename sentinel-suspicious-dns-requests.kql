@@ -1,0 +1,51 @@
+// detect suspicious DNS requests using dns security policy and threat intelligence
+let dt_lookBack = 1h;      // needs to be in sync with the summary rule aggregation interval
+let ioc_lookBack = 14d;    // Look back 14 days for threat intelligence indicators
+// get all active domains from threat intel
+let ThreatIntel = (
+    ThreatIntelIndicators
+    | where IsActive == true
+    | summarize LatestIndicatorTime = arg_max(TimeGenerated, *) by Id
+    | extend source = Data.name
+    | extend IndicatorType = tostring(Data.indicator_types)
+    | extend DomainName = ObservableValue
+    | where ObservableKey has "domain"
+);
+// save domain names in set
+let ThreatIntelDomainSet = (
+    ThreatIntel
+    | distinct DomainName
+    | where isnotempty(DomainName)
+    | summarize make_set(DomainName)
+);
+//----------------------
+let ioc_match_domain_only = (
+    ThreatIntel
+    | where isnotempty(DomainName)
+    | distinct DomainName, IsActive, Confidence, ValidUntil, IndicatorType 
+    | where IsActive == "true" and ValidUntil > now()
+    | lookup kind=inner (
+        DNSQueryLogs_sum_CL
+        | where TimeGenerated >= ago(dt_lookBack)
+        // extract contoso.com from sub.contoso.com
+        | extend DomainName = replace_regex(QueryName, "^.*?\\.", "")      
+    ) on $left.DomainName == $right.DomainName
+);
+let ioc_match_exact = (
+    ThreatIntel
+    | where isnotempty(DomainName)
+    | distinct DomainName, IsActive, Confidence, ValidUntil, IndicatorType 
+    | lookup kind=inner (
+        DNSQueryLogs_sum_CL
+        | where TimeGenerated >= ago(dt_lookBack)
+        | extend DomainName = replace_regex(QueryName, "^.*?\\.", "")
+    ) on $left.DomainName == $right.QueryName
+);
+let ioc_match_exact_answers = (
+    DNSQueryLogs_sum_CL
+    | where TimeGenerated >= ago(dt_lookBack)
+    | where Answers has_any(ThreatIntelDomainSet)
+);
+ioc_match_domain_only
+| union ioc_match_exact, ioc_match_exact_answers
+| project TimeGenerated, QueryName, DomainName, IsActive, Confidence, ValidUntil, IndicatorType, RType, OperationName, SourceIpAddress, Transport, Answers, RDataCount, EventCount, Region, VirtualNetworkId

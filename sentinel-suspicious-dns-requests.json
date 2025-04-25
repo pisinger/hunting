@@ -1,0 +1,92 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "workspace": {
+            "type": "String"
+        }
+    },
+    "resources": [
+        {
+            "id": "[concat(resourceId('Microsoft.OperationalInsights/workspaces/providers', parameters('workspace'), 'Microsoft.SecurityInsights'),'/alertRules/01387607-a778-4c4e-b9d8-46cd5a603221')]",
+            "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/01387607-a778-4c4e-b9d8-46cd5a603221')]",
+            "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+            "kind": "Scheduled",
+            "apiVersion": "2023-12-01-preview",
+            "properties": {
+                "displayName": "Suspicious DNS queries",
+                "description": "detect suspicious DNS requests using dns security policy and threat intelligence. Runs every 1h based on dns summary rule which aggregates on 1h interval",
+                "severity": "Medium",
+                "enabled": true,
+                "query": "let dt_lookBack = 1h;      // needs to be in sync with the summary rule aggregation interval\r\nlet ioc_lookBack = 14d;    // Look back 14 days for threat intelligence indicators\r\n// get all active domains from threat intel\r\nlet ThreatIntel = (\r\n    ThreatIntelIndicators\r\n    | where IsActive == true\r\n    | summarize LatestIndicatorTime = arg_max(TimeGenerated, *) by Id\r\n    | extend source = Data.name\r\n    | extend IndicatorType = tostring(Data.indicator_types)\r\n    | extend DomainName = ObservableValue\r\n    | where ObservableKey has \"domain\"\r\n);\r\n// save domain names in set\r\nlet ThreatIntelDomainSet = (\r\n    ThreatIntel\r\n    | distinct DomainName\r\n    | where isnotempty(DomainName)\r\n    | summarize make_set(DomainName)\r\n);\r\n//----------------------\r\nlet ioc_match_domain_only = (\r\n    ThreatIntel\r\n    | where isnotempty(DomainName)\r\n    | distinct DomainName, IsActive, Confidence, ValidUntil, IndicatorType \r\n    | where IsActive == \"true\" and ValidUntil > now()\r\n    | lookup kind=inner (\r\n        DNSQueryLogs_sum_CL\r\n        | where TimeGenerated >= ago(dt_lookBack)\r\n        // extract contoso.com from sub.contoso.com\r\n        | extend DomainName = replace_regex(QueryName, \"^.*?\\\\.\", \"\")      \r\n    ) on $left.DomainName == $right.DomainName\r\n);\r\nlet ioc_match_exact = (\r\n    ThreatIntel\r\n    | where isnotempty(DomainName)\r\n    | distinct DomainName, IsActive, Confidence, ValidUntil, IndicatorType \r\n    | lookup kind=inner (\r\n        DNSQueryLogs_sum_CL\r\n        | where TimeGenerated >= ago(dt_lookBack)\r\n        | extend DomainName = replace_regex(QueryName, \"^.*?\\\\.\", \"\")\r\n    ) on $left.DomainName == $right.QueryName\r\n);\r\nlet ioc_match_exact_answers = (\r\n    DNSQueryLogs_sum_CL\r\n    | where TimeGenerated >= ago(dt_lookBack)\r\n    | where Answers has_any(ThreatIntelDomainSet)\r\n);\r\nioc_match_domain_only\r\n| union ioc_match_exact, ioc_match_exact_answers\r\n| project TimeGenerated, QueryName, DomainName, IsActive, Confidence, ValidUntil, IndicatorType, RType, OperationName, SourceIpAddress, Transport, Answers, RDataCount, EventCount, Region, VirtualNetworkId",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "P14D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT5H",
+                "suppressionEnabled": false,
+                "startTimeUtc": null,
+                "tactics": [
+                    "CommandAndControl",
+                    "Exfiltration"
+                ],
+                "techniques": [],
+                "subTechniques": [],
+                "alertRuleTemplateName": null,
+                "incidentConfiguration": {
+                    "createIncident": true,
+                    "groupingConfiguration": {
+                        "enabled": true,
+                        "reopenClosedIncident": false,
+                        "lookbackDuration": "P1D",
+                        "matchingMethod": "AnyAlert",
+                        "groupByEntities": [],
+                        "groupByAlertDetails": [],
+                        "groupByCustomDetails": []
+                    }
+                },
+                "eventGroupingSettings": {
+                    "aggregationKind": "SingleAlert"
+                },
+                "alertDetailsOverride": null,
+                "customDetails": {
+                    "VnetRegion": "Region",
+                    "VnetId": "VirtualNetworkId",
+                    "Protocol": "Transport",
+                    "ThreatType": "IndicatorType"
+                },
+                "entityMappings": [
+                    {
+                        "entityType": "IP",
+                        "fieldMappings": [
+                            {
+                                "identifier": "Address",
+                                "columnName": "SourceIpAddress"
+                            }
+                        ]
+                    },
+                    {
+                        "entityType": "DNS",
+                        "fieldMappings": [
+                            {
+                                "identifier": "DomainName",
+                                "columnName": "DomainName"
+                            }
+                        ]
+                    },
+                    {
+                        "entityType": "DNS",
+                        "fieldMappings": [
+                            {
+                                "identifier": "DomainName",
+                                "columnName": "QueryName"
+                            }
+                        ]
+                    }
+                ],
+                "sentinelEntitiesMappings": null,
+                "templateVersion": null
+            }
+        }
+    ]
+}
