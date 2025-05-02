@@ -1,0 +1,14 @@
+// summary rule to then check for suspicious dns via threat intel table
+DNSQueryLogs
+| extend Answer = iif(Answer == "[]", '["NXDOMAIN"]', Answer)
+| extend Answer = todynamic(Answer)
+| mv-expand Answer
+| extend parsed = parse_json(Answer)
+| extend RData = parsed.RData
+| extend RType = tostring(parsed.Type)
+// removing the trailing dot
+| extend QueryName = tolower(trim_end("\\.", QueryName))
+// finally aggregate
+| summarize EventCount = count(), Answers = make_set(tostring(RData)) 
+	by bin(TimeGenerated, 1h), RType, OperationName, Region, VirtualNetworkId, SourceIpAddress, Transport, QueryName, QueryType, ResponseCode, ResolutionPath, ResolverPolicyRuleAction
+| extend RDataCount = array_length(Answers)
