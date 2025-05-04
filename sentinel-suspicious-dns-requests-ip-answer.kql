@@ -1,0 +1,18 @@
+// check for ip ioc match in dns answer
+let dt_lookBack = 1d;
+let ioc_lookBack = 14d;
+ThreatIntelIndicators
+| where IsActive == true
+| summarize LatestIndicatorTime = arg_max(TimeGenerated, *) by Id
+| extend IndicatorType = tostring(Data.indicator_types)
+| where ObservableKey has "network-traffic"
+| extend IpAddr = ObservableValue
+| where isnotempty(IpAddr)
+| project IpAddr, IsActive, Confidence, ValidUntil, IndicatorType
+//-----------
+| join kind=inner (
+    DNSQueryLogs_sum_CL
+	| where TimeGenerated >= ago(dt_lookBack)
+    | where RType in ("A","AAAA")
+    | mv-expand Answers to typeof(string)
+) on $left.IpAddr == $right.Answers
