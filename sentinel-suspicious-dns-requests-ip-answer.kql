@@ -1,7 +1,9 @@
-// check for ip ioc match in dns answer
-let dt_lookBack = 1d;
+// check for ip ioc match in dns answer by joining with custom DNSQueryLogs summary table
+// https://github.com/pisinger/hunting/blob/main/sentinel-summary-rule-DNSQueryLogs.kql
+let dt_lookBack = 1h;
 let ioc_lookBack = 14d;
 ThreatIntelIndicators
+| where TimeGenerated >= ago(ioc_lookBack) and ValidUntil > now()
 | where IsActive == true
 | summarize LatestIndicatorTime = arg_max(TimeGenerated, *) by Id
 | extend IndicatorType = tostring(Data.indicator_types)
@@ -13,6 +15,35 @@ ThreatIntelIndicators
 | join kind=inner (
     DNSQueryLogs_sum_CL
 	| where TimeGenerated >= ago(dt_lookBack)
+	| where RType in ("A","AAAA")
+	| mv-expand Answers to typeof(string)
+	| distinct QueryName, RType, Answers
+) on $left.IpAddr == $right.Answers
+
+// check for ip ioc match in dns answer by joining with built-in DNSQueryLogs table
+let dt_lookBack = 1h;
+let ioc_lookBack = 14d;
+ThreatIntelIndicators
+| where TimeGenerated >= ago(ioc_lookBack) and ValidUntil > now()
+| where IsActive == true
+| summarize LatestIndicatorTime = arg_max(TimeGenerated, *) by Id
+| extend IndicatorType = tostring(Data.indicator_types)
+| where ObservableKey has "network-traffic"
+| extend IpAddr = ObservableValue
+| where isnotempty(IpAddr)
+| project IpAddr, IsActive, Confidence, ValidUntil, IndicatorType
+//-----------
+| join kind=inner (
+    DNSQueryLogs
+    | where TimeGenerated >= ago(dt_lookBack)
+    | extend Answer = iif(Answer == "[]", '["NXDOMAIN"]', Answer)
+    | extend Answer = todynamic(Answer)
+    | mv-expand Answer
+    | extend parsed = parse_json(Answer)
+    | extend RData = parsed.RData
+    | extend RType = tostring(parsed.Type)
+    // removing the trailing dot
+    | extend QueryName = tolower(trim_end("\\.", QueryName))
     | where RType in ("A","AAAA")
-    | mv-expand Answers to typeof(string)
+    | distinct Answers = tostring(RData), QueryName, RType
 ) on $left.IpAddr == $right.Answers
