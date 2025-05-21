@@ -1,4 +1,6 @@
-let dt_lookBack = 4d;
+// outbound connections to malicious destinations with dns mapping and bytes sent/recv
+// using vnet flow logs (NTA) and dns query logs (azure dns security policy)
+let dt_lookBack = 1d;
 NTANetAnalytics
 | where TimeGenerated >= ago(dt_lookBack)
 | where SubType == 'FlowLog' and FaSchemaVersion == '3' and FlowType != "IntraVNet"
