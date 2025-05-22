@@ -7,8 +7,8 @@
 //	- Highlight traffic to known malicious destinations using built-in capabilities from Network Traffic Analytics
 //
 // Limitations: 
-//	- Because of the nature how packet forwarding and routing through centralized egress is handled, you may see same connections twice (inbound to egress vnet + outbound from egress via SNAT) when not excluding the outbound flows from the NAT egress machine. 
-//	- On the other hand, when excluding those, you will then also lose visibility into connectiions initiated by the egress machine itself rather than forwarding packets. This is a trade-off you have to make depending on your use case.
+//	- Because of the nature of how packet forwarding and routing through centralized egress is handled, you may see same connections twice (inbound to egress vnet + outbound from egress via SNAT) when not excluding the outbound flows from the NAT egress machine. 
+//	- On the other hand, when excluding those, you will then also lose visibility into connectiions initiated by the egress machine itself rather than just losing the flows of forwarding packets. This is a trade-off you have to make depending on your use case.
 //
 // Requirements:
 //	- Azure VNet Flow Logs with traffic analytics enabled
