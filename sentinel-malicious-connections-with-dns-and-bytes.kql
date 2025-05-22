@@ -1,6 +1,21 @@
 // outbound connections to malicious destinations with dns mapping and bytes sent/recv
-// using vnet flow logs (NTA) and dns query logs (azure dns security policy)
-let dt_lookBack = 1d;
+// detailed query explanation can be found at https://pisinger.github.io/posts/detection-of-malicious-outbound-connections-with-dns-mapping/
+//
+//	- Identify outbound connections either directly from VMs (inlcuding AKS) or through VNet integration (forwarding, serverless)
+//	- Identify outbound connections from serverless resources like Azure App Services and Container Instances
+//	- Map IPs to their corresponding DNS names for better readability and detection capabilities
+//	- Highlight traffic to known malicious destinations using built-in capabilities from Network Traffic Analytics
+//
+// Limitations: 
+//	- Because of the nature how packet forwarding and routing through centralized egress is handled, you may see same connections twice (inbound to egress vnet + outbound from egress via SNAT) when not excluding the outbound flows from the NAT egress machine. 
+//	- On the other hand, when excluding those, you will then also lose visibility into connectiions initiated by the egress machine itself rather than forwarding packets. This is a trade-off you have to make depending on your use case.
+//
+// Requirements:
+//	- Azure VNet Flow Logs with traffic analytics enabled
+//	- Azue DNS Security Policy with diagnostics logging configured
+//	- Tables: NTANetAnalytics, NTAIpDetails, DNSQueryLogs
+//
+let dt_lookBack = 7d;
 NTANetAnalytics
 | where TimeGenerated >= ago(dt_lookBack)
 | where SubType == 'FlowLog' and FaSchemaVersion == '3' and FlowType != "IntraVNet"
@@ -9,28 +24,30 @@ NTANetAnalytics
 | extend 
     Region = iff(FlowDirection == "Inbound", DestRegion, SrcRegion),
     Subscription = tostring(split(TargetResourceId,"/")[0]),
-    Host = iff(FlowDirection == "Inbound", iff(isempty(DestVm), TargetResourceId, DestVm), iff(isempty(SrcVm), TargetResourceId, SrcVm))
+    HostVm = case(
+        FlowDirection == "Inbound" and IsFlowCapturedAtUdrHop == "true" and not(isempty(SrcVm)), SrcVm,		// vnet integration
+        FlowDirection == "Inbound" and IsFlowCapturedAtUdrHop == "true" and isempty(coalesce(SrcVm,DestVm)), TargetResourceId,	// vnet integration
+        FlowDirection == "Inbound" and IsFlowCapturedAtUdrHop == "false" and not(isempty(DestVm)), DestVm,	// direct
+        SrcVm
+    )
 //---------------
-// handle egress routing via vnet integration
-| extend Host = case(
-    FlowDirection == "Outbound" and DestVm has "unknown-vm" and TargetResourceId !has "/mc_", "VNET_INTEGRATION",
-    FlowDirection == "Inbound" and SrcVm has "unknown-vm" and TargetResourceId !has "/mc_", "VNET_INTEGRATION",
-    FlowDirection == "Outbound" and isempty(DestVm) and FlowType startswith "Unknown" and TargetResourceId !has "/mc_", "VNET_INTEGRATION",
-    FlowDirection == "Inbound" and isempty(SrcVm) and FlowType startswith "Unknown" and TargetResourceId !has "/mc_", "VNET_INTEGRATION",
-    Host
-)
-//---------------
-// revert direction in case of vnet based egress
-| extend FlowDirection = case(
-    Host startswith "VNET_INTEGRATION" and FlowDirection == "Inbound" and FlowType startswith "Unknown", "Outbound",
-    Host startswith "VNET_INTEGRATION" and FlowDirection == "Inbound" and SrcVm == "unknown-rg/unknown-vm", "Outbound",
-    FlowDirection
+// identify egress routing for vm and serverless resources (vnet integration)
+| extend RouteType = case(
+    TargetResourceId !has "/mc_" and IsFlowCapturedAtUdrHop == "true" and (
+        (FlowDirection == "Outbound" and DestVm has "unknown-vm") or (FlowDirection == "Inbound" and SrcVm has "unknown-vm") or
+        (FlowDirection == "Outbound" and isempty(DestVm) and FlowType startswith "Unknown") or (FlowDirection == "Inbound" and isempty(SrcVm) and FlowType startswith "Unknown")
+    ), "VNET_INTEGRATION_APPS", 
+    IsFlowCapturedAtUdrHop == "true" and FlowDirection == "Inbound" and TargetResourceId !has "/mc_", "VNET_INTEGRATION_VM",
+    "DIRECT"
 )
 //---------------
 // exclude inbound answers in vnet integration scenarios
-| where not(AclRule == "platformrule" and FlowDirection == "Outbound")
-| where Host != TargetResourceId
+| where not(AclRule == "platformrule" and IsFlowCapturedAtUdrHop == "true" and FlowDirection == "Outbound")
 //---------------
+// revert direction in case of vnet based egress (SNAT)
+| extend FlowDirection = iff(RouteType startswith "VNET_INTEGRATION" and IsFlowCapturedAtUdrHop == "true" and FlowDirection == "Inbound", "Outbound", FlowDirection)
+//---------------
+// extract ips from single line tuples
 | mv-expand SrcPublicIps_s = split(SrcPublicIps, " ")
 | mv-expand DestPublicIps_s = split(DestPublicIps, " ")
 | extend
@@ -43,22 +60,24 @@ NTANetAnalytics
 	DestIp = tostring(iff(isempty(DestIp), DestPublicIps_s, DestIp)),
     AclGroup = tostring(split(AclGroup, "/")[-1])
 //---------------
+// visualizer
 | extend Action = iff(FlowStatus == "Allowed", "✅", "⛔")
-| extend Type = case(
+| extend FlowTypeUni = case(
     FlowType == "MaliciousFlow" and (not(ipv4_is_private(SrcIp)) or not(ipv4_is_private(DestIp))), "🌐 Public ⚠️ Malicious",
     FlowType == "MaliciousFlow", "🏠 Internal ⚠️ Malicious", not(ipv4_is_private(SrcIp)) or not(ipv4_is_private(DestIp)), "🌐 Public", 
     "🏠 Internal"
 )
-//---------------
-// filters
+//------------------------------
+// early filters
 | where FlowDirection == "Outbound"
 //| where not(ipv4_is_private(DestIp))
-| where Type !endswith "Internal"
-//| where Host == "VNET_INTEGRATION"
-//---------------
+//| where FlowTypeUni !endswith "Internal"
+//| where RouteType startswith "VNET_INTEGRATION"	// VNET_* or DIRECT
+//| where HostVm !has "aks"       // include/exclude aks
+//------------------------------
 | summarize 
     BytesSentMb = round(sum(BytesSrcToDest/1024./1024.),3), BytesRecvMb = round(sum(BytesDestToSrc/1024./1024.),3),
-	count() by Host, AclGroup, AclRule, Region, FlowDirection, Action, FlowStatus, Type, L4Protocol, SrcIp, DestIp, DestPort, FlowType
+	count() by HostVm, RouteType, IsFlowCapturedAtUdrHop, AclGroup, AclRule, Region, FlowDirection, Action, FlowStatus, FlowTypeUni, L4Protocol, SrcIp, DestIp, DestPort, FlowType
 //---------------
 // join with location info
 | join kind=leftouter(
@@ -66,12 +85,12 @@ NTANetAnalytics
     | summarize arg_max(TimeGenerated, *) by Ip 
     | project Ip, Location, PublicIpDetails
 ) on $left.DestIp == $right.Ip
-| project Host, AclGroup, AclRule, FlowDirection, Action, FlowStatus, Type, L4Protocol, SrcIp, DestIp, DestPort, BytesSentMb, BytesRecvMb, PublicIpDetails, Location, Region, FlowType, count_
+| project HostVm, RouteType, IsFlowCapturedAtUdrHop, AclGroup, AclRule, FlowDirection, Action, FlowStatus, FlowTypeUni, L4Protocol, SrcIp, DestIp, DestPort, BytesSentMb, BytesRecvMb, PublicIpDetails, Location, Region, FlowType, count_
 //---------------
 // join dns to map fqdn to ip
 | join kind=leftouter (
     DNSQueryLogs
-    | where TimeGenerated >= ago(dt_lookBack + 1h)
+    | where TimeGenerated >= ago(dt_lookBack)
     | extend Answer = iif(Answer == "[]", '["NXDOMAIN"]', Answer)
     | extend Answer = todynamic(Answer)
     | mv-expand Answer
@@ -84,7 +103,7 @@ NTANetAnalytics
     | distinct Answers = tostring(RData), QueryName, RType
 ) on $left.DestIp == $right.Answers
 //---------------
-| summarize QueryName = make_set(QueryName) by Host, AclGroup, AclRule, FlowDirection, Action, FlowStatus, Type, L4Protocol, SrcIp, DestIp, DestPort, PublicIpDetails, BytesSentMb, BytesRecvMb, Location, Region, FlowType, count_
+| summarize QueryName = make_set(QueryName) by HostVm, RouteType, IsFlowCapturedAtUdrHop, AclGroup, AclRule, FlowDirection, Action, FlowStatus, FlowTypeUni, L4Protocol, SrcIp, DestIp, DestPort, PublicIpDetails, BytesSentMb, BytesRecvMb, Location, Region, FlowType, count_
 | extend QueryNameSingle = QueryName[0]		// extract first entry from array to use this as entity in sentinel
-| extend Client = iff(Host startswith "VNET_INTEGRATION", Host, toupper(tostring(split(Host,"/")[1])))
-| project Client, Host, AclGroup, AclRule, FlowDirection, Action, FlowStatus, Type, L4Protocol, SrcIp, QueryNameSingle, QueryName, DestIp, DestPort, PublicIpDetails, BytesSentMb, BytesRecvMb, Location, Region, FlowType, count_
+| extend Client = toupper(tostring(split(HostVm,"/")[1]))
+| project Client, HostVm, RouteType, IsFlowCapturedAtUdrHop, AclGroup, AclRule, FlowDirection, Action, FlowStatus, FlowTypeUni, L4Protocol, SrcIp, QueryNameSingle, QueryName, DestIp, DestPort, PublicIpDetails, BytesSentMb, BytesRecvMb, Location, Region, FlowType, count_
