@@ -1,6 +1,7 @@
 // outbound connections to malicious destinations with dns mapping and bytes sent/recv
+// author: https://github.com/pisinger/hunting
+//---------------
 // detailed query explanation can be found at https://pisinger.github.io/posts/detection-of-malicious-outbound-connections-with-dns-mapping/
-//
 //	- Identify outbound connections either directly from VMs (inlcuding AKS) or through VNet integration (forwarding, serverless)
 //	- Identify outbound connections from serverless resources like Azure App Services and Container Instances
 //	- Map IPs to their corresponding DNS names for better readability and detection capabilities
