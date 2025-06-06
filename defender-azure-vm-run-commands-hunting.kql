@@ -1,0 +1,44 @@
+// Retrieve Azure VM Run Commands through Defender AH tables
+// author: https://github.com/pisinger/hunting
+//---------------
+// Based on my investigation, tracking the Run Commands through Defender AH works pretty well on Linux machines, including capturing the full script content. On Windows, the visibility is more limited — it typically logs only certain executions, depending on the security context and Defender’s telemetry focus instead of the full script content. 
+//---------------
+// Keep in mind: Defender for Endpoint is a security solution, not a full auditing or monitoring tool. That said, it can still offer valuable insights into Run Command usage on Windows even while not seeing the full script content.
+//---------------
+let RunCommandsWindows = DeviceProcessEvents
+    //| where FolderPath contains "runCommandWindows" or FolderPath contains "waagent/run-command" or ProcessCommandLine contains "script12.ps1"
+    | where InitiatingProcessCommandLine has ("runCommandExtension.exe") and (ProcessCommandLine contains "ExecutionPolicy" or ProcessCommandLine contains ".ps1")
+    | project Timestamp, DeviceName, ActionType, FileName, FolderPath, SHA256, ProcessCommandLine, InitiatingProcessCommandLine, ProcessIntegrityLevel, AccountName, AccountSid, LogonId
+    | extend FileName = split(ProcessCommandLine, " ")[-1]
+    //| where AccountName =~ "system"
+    // we cannot use SHA256 as this is related to cmd.exe as the initiating process, thus relying on script FileName only for later correlation
+    | project FileName //, Timestamp, DeviceName
+;
+//-----------------
+let RunCommandsLinux = DeviceFileEvents
+    | where FolderPath contains "run-command/download" and FileName contains ".sh"
+    | summarize make_set(ActionType) by bin(Timestamp,1m), DeviceName, FileName, FolderPath, SHA1, SHA256, InitiatingProcessAccountName
+    //| extend FileName = split(FolderPath, " ")[-1]
+    | join kind=inner (DeviceEvents) on SHA256
+    | project FileName, SHA256, parse_json(AdditionalFields).ScriptContent
+;
+let RunCommandsLinuxFileName = RunCommandsLinux | summarize make_set(FileName);
+let RunCommandsLinuxFileSHA256 = RunCommandsLinux | summarize make_set(SHA256);
+//-----------------
+union DeviceProcessEvents, DeviceEvents, DeviceFileEvents
+| where
+    ProcessCommandLine has_any (RunCommandsWindows) or InitiatingProcessCommandLine has_any (RunCommandsWindows) or
+    ProcessCommandLine has_any (RunCommandsLinuxFileName) or InitiatingProcessCommandLine has_any (RunCommandsLinuxFileName) or 
+    SHA256 has_any(RunCommandsLinuxFileSHA256)  
+| extend ScriptContent = parse_json(AdditionalFields).ScriptContent
+| extend RunCommand = parse_json(AdditionalFields).Command
+| extend RunCommand = iff (RunCommand == "" and not(ProcessCommandLine has_any (RunCommandsWindows) or ProcessCommandLine has_any(RunCommandsLinux)), ProcessCommandLine, RunCommand)
+| extend RunCommand = coalesce (todynamic(RunCommand), ScriptContent)
+| project Timestamp, DeviceId, DeviceName = split(DeviceName,".")[0], ActionType, FileName, FolderPath, InitiatingProcessFolderPath, InitiatingProcessFileName, RunCommand, ScriptContent, ProcessCommandLine, InitiatingProcessCommandLine, AccountName, AccountSid, LogonId, SHA256, ReportId, RequestAccountName
+//-----------------
+| extend AccountName = coalesce (AccountName, RequestAccountName)
+| project-away ScriptContent, ProcessCommandLine, LogonId, AccountSid, RequestAccountName, FileName, FolderPath
+| where isnotempty(RunCommand) and InitiatingProcessCommandLine !has ("Cpowershell")
+// exclude non runCommand related processes where any script.sh is run
+| where not(ActionType == "ProcessCreated" and InitiatingProcessCommandLine has "script.sh" and InitiatingProcessCommandLine !has ("run-command"))
+| sort by Timestamp desc
