@@ -5,19 +5,16 @@
 //---------------
 // Keep in mind: Defender for Endpoint is a security solution, not a full auditing or monitoring tool. That said, it can still offer valuable insights into Run Command usage on Windows even while not seeing the full script content.
 //---------------
-let RunCommandsWindows = DeviceProcessEvents
-    //| where FolderPath contains "runCommandWindows" or FolderPath contains "waagent/run-command" or ProcessCommandLine contains "script12.ps1"
-    | where InitiatingProcessCommandLine has ("runCommandExtension.exe") and (ProcessCommandLine contains "ExecutionPolicy" or ProcessCommandLine contains ".ps1")
-    | project Timestamp, DeviceName, ActionType, FileName, FolderPath, SHA256, ProcessCommandLine, InitiatingProcessCommandLine, ProcessIntegrityLevel, AccountName, AccountSid, LogonId
-    | extend FileName = split(ProcessCommandLine, " ")[-1]
-    //| where AccountName =~ "system"
-    // we cannot use SHA256 as this is related to cmd.exe as the initiating process, thus relying on script FileName only for later correlation
-    | project FileName //, Timestamp, DeviceName
+let RunCommandsWindows = DeviceFileEvents
+    | where InitiatingProcessFileName == "runcommandextension.exe" and FileName contains ".ps1" and isnotempty(FileSize)
+    | project TimeGenerated, DeviceName, FileName, SHA256, FolderPath, InitiatingProcessAccountName
 ;
+let RunCommandsWindowsFileName = RunCommandsWindows | summarize make_set(FileName);
+let RunCommandsWindowsFileSHA256 = RunCommandsWindows | summarize make_set(SHA256);
 //-----------------
 let RunCommandsLinux = DeviceFileEvents
     | where FolderPath contains "run-command/download" and FileName contains ".sh"
-    | summarize make_set(ActionType) by bin(Timestamp,1m), DeviceName, FileName, FolderPath, SHA1, SHA256, InitiatingProcessAccountName
+    | summarize make_set(ActionType) by bin(TimeGenerated,1m), DeviceName, FileName, FolderPath, SHA1, SHA256, InitiatingProcessAccountName
     //| extend FileName = split(FolderPath, " ")[-1]
     | join kind=inner (DeviceEvents) on SHA256
     | project FileName, SHA256, parse_json(AdditionalFields).ScriptContent
@@ -25,20 +22,21 @@ let RunCommandsLinux = DeviceFileEvents
 let RunCommandsLinuxFileName = RunCommandsLinux | summarize make_set(FileName);
 let RunCommandsLinuxFileSHA256 = RunCommandsLinux | summarize make_set(SHA256);
 //-----------------
+// using script FileName or its SHA256 for correlation
 union DeviceProcessEvents, DeviceEvents, DeviceFileEvents
 | where
-    ProcessCommandLine has_any (RunCommandsWindows) or InitiatingProcessCommandLine has_any (RunCommandsWindows) or
+    ProcessCommandLine has_any (RunCommandsWindowsFileName) or InitiatingProcessCommandLine has_any (RunCommandsWindowsFileName) or
     ProcessCommandLine has_any (RunCommandsLinuxFileName) or InitiatingProcessCommandLine has_any (RunCommandsLinuxFileName) or 
-    SHA256 has_any(RunCommandsLinuxFileSHA256)  
+    SHA256 has_any(RunCommandsLinuxFileSHA256) or SHA256 has_any (RunCommandsWindowsFileSHA256)
 | extend ScriptContent = parse_json(AdditionalFields).ScriptContent
 | extend RunCommand = parse_json(AdditionalFields).Command
 | extend RunCommand = iff (RunCommand == "" and not(ProcessCommandLine has_any (RunCommandsWindows) or ProcessCommandLine has_any(RunCommandsLinux)), ProcessCommandLine, RunCommand)
 | extend RunCommand = coalesce (todynamic(RunCommand), ScriptContent)
-| project Timestamp, DeviceId, DeviceName = split(DeviceName,".")[0], ActionType, FileName, FolderPath, InitiatingProcessFolderPath, InitiatingProcessFileName, RunCommand, ScriptContent, ProcessCommandLine, InitiatingProcessCommandLine, AccountName, AccountSid, LogonId, SHA256, ReportId, RequestAccountName
+| project TimeGenerated, DeviceId, DeviceName = split(DeviceName,".")[0], ActionType, FileName, FolderPath, InitiatingProcessFolderPath, InitiatingProcessFileName, RunCommand, ScriptContent, ProcessCommandLine, InitiatingProcessCommandLine, AccountName, AccountSid, LogonId, SHA256, ReportId, RequestAccountName
 //-----------------
 | extend AccountName = coalesce (AccountName, RequestAccountName)
 | project-away ScriptContent, ProcessCommandLine, LogonId, AccountSid, RequestAccountName, FileName, FolderPath
-| where isnotempty(RunCommand) and InitiatingProcessCommandLine !has ("Cpowershell")
+| where isnotempty(RunCommand) and InitiatingProcessCommandLine !has ("Cpowershell") and RunCommand !has ("Cpowershell") and InitiatingProcessFileName != "csrss.exe"
 // exclude non runCommand related processes where any script.sh is run
 | where not(ActionType == "ProcessCreated" and InitiatingProcessCommandLine has "script.sh" and InitiatingProcessCommandLine !has ("run-command"))
-| sort by Timestamp desc
+| sort by TimeGenerated desc
