@@ -7,36 +7,36 @@
 //---------------
 let RunCommandsWindows = DeviceFileEvents
     | where InitiatingProcessFileName == "runcommandextension.exe" and FileName contains ".ps1" and isnotempty(FileSize)
-    | project TimeGenerated, DeviceName, FileName, SHA256, FolderPath, InitiatingProcessAccountName
+    | project Timestamp, DeviceId, DeviceName, FileName, SHA256, FolderPath, InitiatingProcessAccountName, FileSize
 ;
 let RunCommandsWindowsFileName = RunCommandsWindows | summarize make_set(FileName);
 let RunCommandsWindowsFileSHA256 = RunCommandsWindows | summarize make_set(SHA256);
 //-----------------
 let RunCommandsLinux = DeviceFileEvents
     | where FolderPath contains "run-command/download" and FileName contains ".sh"
-    | summarize make_set(ActionType) by bin(TimeGenerated,1m), DeviceName, FileName, FolderPath, SHA1, SHA256, InitiatingProcessAccountName
-    //| extend FileName = split(FolderPath, " ")[-1]
-    | join kind=inner (DeviceEvents) on SHA256
-    | project FileName, SHA256, parse_json(AdditionalFields).ScriptContent
+    | where ActionType == "FileCreated"
+    | project Timestamp, DeviceId, DeviceName, FileName, FolderPath, SHA1, SHA256, InitiatingProcessAccountName, FileSize
+    //| join kind=inner (DeviceEvents) on SHA256
+    //| project Timestamp, FileName, SHA256, parse_json(AdditionalFields).ScriptContent
 ;
 let RunCommandsLinuxFileName = RunCommandsLinux | summarize make_set(FileName);
 let RunCommandsLinuxFileSHA256 = RunCommandsLinux | summarize make_set(SHA256);
+let Devices = union RunCommandsWindows, RunCommandsLinux | summarize make_set(DeviceId);
 //-----------------
 // using script FileName or its SHA256 for correlation
-union DeviceProcessEvents, DeviceEvents, DeviceFileEvents
+union DeviceProcessEvents, DeviceEvents
+| where DeviceId has_any (Devices)
 | where
-    ProcessCommandLine has_any (RunCommandsWindowsFileName) or InitiatingProcessCommandLine has_any (RunCommandsWindowsFileName) or
-    ProcessCommandLine has_any (RunCommandsLinuxFileName) or InitiatingProcessCommandLine has_any (RunCommandsLinuxFileName) or 
-    SHA256 has_any(RunCommandsLinuxFileSHA256) or SHA256 has_any (RunCommandsWindowsFileSHA256)
+    ProcessCommandLine has_any (RunCommandsWindowsFileName) or InitiatingProcessCommandLine has_any (RunCommandsWindowsFileName) 
+    or SHA256 has_any (RunCommandsWindowsFileSHA256) or SHA256 has_any(RunCommandsLinuxFileSHA256)
 | extend ScriptContent = parse_json(AdditionalFields).ScriptContent
 | extend RunCommand = parse_json(AdditionalFields).Command
 | extend RunCommand = iff (RunCommand == "" and not(ProcessCommandLine has_any (RunCommandsWindows) or ProcessCommandLine has_any(RunCommandsLinux)), ProcessCommandLine, RunCommand)
 | extend RunCommand = coalesce (todynamic(RunCommand), ScriptContent)
-| project TimeGenerated, DeviceId, DeviceName = split(DeviceName,".")[0], ActionType, FileName, FolderPath, InitiatingProcessFolderPath, InitiatingProcessFileName, RunCommand, ScriptContent, ProcessCommandLine, InitiatingProcessCommandLine, AccountName, AccountSid, LogonId, SHA256, ReportId, RequestAccountName
+| project Timestamp, DeviceId, DeviceName = split(DeviceName,".")[0], ActionType, FileName, FolderPath, InitiatingProcessFolderPath, InitiatingProcessFileName, RunCommand, ScriptContent, ProcessCommandLine, InitiatingProcessCommandLine, AccountName, AccountSid, LogonId, SHA256, ReportId
 //-----------------
-| extend AccountName = coalesce (AccountName, RequestAccountName)
-| project-away ScriptContent, ProcessCommandLine, LogonId, AccountSid, RequestAccountName, FileName, FolderPath
+| project-away ScriptContent, ProcessCommandLine, LogonId, AccountSid, FileName, FolderPath
 | where isnotempty(RunCommand) and InitiatingProcessCommandLine !has ("Cpowershell") and RunCommand !has ("Cpowershell") and InitiatingProcessFileName != "csrss.exe"
 // exclude non runCommand related processes where any script.sh is run
-| where not(ActionType == "ProcessCreated" and InitiatingProcessCommandLine has "script.sh" and InitiatingProcessCommandLine !has ("run-command"))
-| sort by TimeGenerated desc
+| where not(ActionType == "ProcessCreated" and InitiatingProcessCommandLine has "script.sh" and InitiatingProcessCommandLine !has ("run-command") and RunCommand has "script.sh")
+| sort by Timestamp desc
