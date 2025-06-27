@@ -1,0 +1,105 @@
+// author: https://github.com/pisinger/hunting
+// queries are based on https://pisinger.github.io/posts/edge-container-observability-using-inspektor-gadget
+// this blog is about a PoC to ingest observability data and signals from arc enabled cluster into Aure Monitor and Sentinel using IG and its eBPF gadgets
+// https://inspektor-gadget.io/
+//---------------
+// See below some example tracing scenarios
+//---------------
+// SNI (Server Name Indication) traffic events, which are commonly used in TLS connections to specify the hostname being connected to
+ContainerLogV2
+| where ContainerName == "ig-sni"
+| extend
+    log_namespace = tostring(LogMessage.k8s.namespace),
+    log_podName = tostring(LogMessage.k8s.podName),
+    log_containerName = tostring(LogMessage.k8s.containerName),
+    log_containerImage = tostring(LogMessage.runtime.containerImageName)
+| where not(isempty(log_namespace))
+| extend
+    log_sni = tostring(LogMessage.name),
+    log_pid = tostring(LogMessage.proc.pid),
+    log_comm = tostring(LogMessage.proc.comm),
+    log_parent = tostring(LogMessage.proc.parent.comm)
+| project TimeGenerated, Computer, log_namespace, log_podName, log_containerName, log_containerImage, log_sni, log_pid, log_parent
+
+// retrieve system calls when seccomp profiles are applied to your pods
+ContainerLogV2
+| where ContainerName == "ig-seccomp"
+| extend
+    log_namespace = tostring(LogMessage.k8s.namespace),
+    log_podName = tostring(LogMessage.k8s.podName),
+    log_containerName = tostring(LogMessage.k8s.containerName),
+    log_containerImage = tostring(LogMessage.runtime.containerImageName)
+| extend
+    log_syscall = tostring(LogMessage.syscall),
+    log_syscall_id = tostring(LogMessage.syscall_raw),
+    log_seccomp_ret_log = tostring(LogMessage.code)
+| summarize count() by bin(TimeGenerated,1h), Computer, log_namespace, log_podName, log_containerName, log_containerImage, log_syscall, log_syscall_id, log_seccomp_ret_log
+
+// dns requests
+ContainerLogV2
+| where ContainerName == "ig-dns"
+| extend
+    log_namespace = tostring(LogMessage.k8s.namespace),
+    log_podName = tostring(LogMessage.k8s.podName),
+    log_containerName = tostring(LogMessage.k8s.containerName),
+    log_containerImage = tostring(LogMessage.runtime.containerImageName)
+| where not(isempty(log_namespace))
+| extend
+    log_id = tostring(LogMessage.id),
+    log_gid = tostring(LogMessage.proc.creds.gid),
+    log_uid = tostring(LogMessage.proc.creds.uid),
+    log_pid = tostring(LogMessage.proc.pid),
+    log_comm = tostring(LogMessage.proc.comm),
+    log_parent = tostring(LogMessage.proc.parent.comm),
+    log_qname = tostring(LogMessage.name),
+    log_qr = tostring(LogMessage.qr),
+    log_qtype = tostring(LogMessage.qtype),
+    log_rcode = tostring(LogMessage.rcode),
+    log_srcIp = tostring(LogMessage.src.addr),
+    log_srcPort = tostring(LogMessage.src.port),
+    log_dstIp = tostring(LogMessage.dst.addr),
+    log_dstPort = tostring(LogMessage.dst.port),
+    log_pktType = tostring(LogMessage.pkt_type),
+    log_latency_ns = tostring(LogMessage.latency_ns),
+    log_raddr = (LogMessage.addresses)
+| where log_qtype == "A"
+| extend log_qr = iff(log_qr == "R", "Response", iff(log_qr == "Q" , "REQUEST", log_qr))
+| where log_qname !endswith ".cluster.local."
+| where log_qr == "Response" and log_pktType == "HOST"
+| where log_rcode !contains "Error"
+| where log_comm != "coredns"
+//----------------
+| project TimeGenerated, Computer, log_namespace, log_podName, log_containerName, log_comm, log_qr, log_qtype, log_rcode, log_qname, log_raddr, log_srcIp, log_srcPort, log_dstIp, log_pktType
+//| where log_podName contains "sample-pod"
+
+// public outbound tcp connections
+ContainerLogV2
+| where ContainerName == "ig-tcp"
+| extend
+    log_namespace = tostring(LogMessage.k8s.namespace),
+    log_podName = tostring(LogMessage.k8s.podName),
+    log_containerName = tostring(LogMessage.k8s.containerName),
+    log_containerImage = tostring(LogMessage.runtime.containerImageName)
+| where not(isempty(log_namespace))
+| extend
+    log_gid = tostring(LogMessage.proc.creds.gid),
+    log_uid = tostring(LogMessage.proc.creds.uid),
+    log_pid = tostring(LogMessage.proc.pid),
+    log_comm = tostring(LogMessage.proc.comm),
+    log_parent = tostring(LogMessage.proc.parent.comm),
+    log_operation = tostring(LogMessage.type),
+    log_ipversion = tostring(LogMessage.src.version),
+    log_srcIp = tostring(LogMessage.src.addr),
+    log_srcPort = tostring(LogMessage.src.port),
+    log_dstIp = tostring(LogMessage.dst.addr),
+    log_dstPort = tostring(LogMessage.dst.port)
+//| where log_operation != "close"
+//----------------
+| where log_srcIp != "127.0.0.1"
+| extend direction = iff(log_operation == "connect", "Outbound", iff(log_operation == "accept", "INBOUND",log_operation))
+| extend remoteIp = iff(direction == "INBOUND", log_dstIp, log_srcIp)
+//----------------
+| where direction == "Outbound"
+| where not(ipv4_is_private(log_dstIp))
+| summarize count(), make_set(log_dstIp) by Computer, log_namespace, log_podName, log_containerName, log_containerImage, log_comm, log_parent, log_srcIp, direction, log_operation, log_dstPort
+| project Computer, log_namespace, log_podName, log_containerName, log_containerImage, log_comm, log_parent, direction, log_operation, log_srcIp, set_log_dstIp, log_dstPort, count_

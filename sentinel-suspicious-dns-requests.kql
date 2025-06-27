@@ -1,3 +1,4 @@
+// author: https://github.com/pisinger/hunting
 // detect suspicious DNS requests using dns security policy and threat intelligence 
 // Note: This query is based on a custom summary rule for DNSQueryLogs -> https://github.com/pisinger/hunting/blob/main/sentinel-summary-rule-DNSQueryLogs.kql
 // The rule will check for exact query matches, parent domain matches, and CNAME answer matches against the threat indicators table
