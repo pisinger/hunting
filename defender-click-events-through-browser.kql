@@ -1,0 +1,16 @@
+// When a link is opened from outside the browser, Windows launches the default browser with the full URL as a command-line argument. 
+// This query extracts those URLs from InitiatingProcessCommandLine to surface link clicks that originate from any application
+// InitiatingProcessParentFileName provides click-source attribution: it identifies the application that triggered the browser launch 
+// Captures browser handoffs where the URL rides the command line — it does not record in-browser navigation or clicks on already-rendered pages.
+// Complements, not replaces, UrlClickEvents (Safe Links clicks in email, Teams, Office apps). Different surfaces - use both.
+DeviceProcessEvents
+| where InitiatingProcessFileName has_any("brave","msedge","chrome")
+| where InitiatingProcessCommandLine contains "https://"
+| extend Urls = extract_all(@"(https?://[^\s""']+)", InitiatingProcessCommandLine)
+| project TimeGenerated, DeviceName, AccountName, FileName, FolderPath, InitiatingProcessParentFileName, InitiatingProcessCommandLine, Urls
+| mv-expand Urls = Urls to typeof(string)
+| extend UrlDomain = (parse_url(Urls).Host)
+| project-away InitiatingProcessCommandLine, FolderPath
+//| summarize make_set(InitiatingProcessParentFileName) by bin(TimeGenerated,10m), DeviceName, AccountName, FileName, tostring(Urls)
+| summarize count() by bin(TimeGenerated,1h), DeviceName, AccountName, FileName, InitiatingProcessParentFileName, tostring(UrlDomain), tostring(Urls)
+| project-reorder TimeGenerated, DeviceName, AccountName, FileName, InitiatingProcessParentFileName, UrlDomain, Urls
