@@ -1,0 +1,11 @@
+// Detecting This Activity Across Your Fleet
+//	- https://pisinger.github.io/posts/defender-network-discovery-under-the-hood/#-decoding-the-scannerargs
+// 	- The query below uses the PSScript_ path as the signal, decorates results with connection outcomes, and summarises by minute per prober device and target 
+//	- giving you the exact port sets MDE hit against each host:
+DeviceNetworkEvents
+| where RemoteIPType in ("Private")
+| where InitiatingProcessFileName == "powershell.exe" and InitiatingProcessCommandLine has @"Defender Advanced Threat Protection\Downloads\PSScript_"
+| extend ActionType = iff(ActionType == "ConnectionFailed", "⛔ConnectionFailed", iff(ActionType == "ConnectionSuccess", "✅ConnectionSuccess", ActionType))
+//| project TimeGenerated, DeviceName, ActionType, InitiatingProcessFileName, InitiatingProcessParentFileName, Protocol, LocalPort, RemoteIP, RemotePort, RemoteIPType
+| summarize make_set(RemotePort), count() by bin(TimeGenerated, 1m), DeviceName, LocalIP, ActionType, InitiatingProcessFileName, Protocol, RemoteIP
+| extend PortCount = array_length(set_RemotePort)
