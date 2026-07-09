@@ -1,0 +1,52 @@
+// https://pisinger.github.io/posts/defender-advanced-hunting-ai-url-clicks-git-repo-targets/
+
+DeviceNetworkEvents
+| where TimeGenerated > ago(7d)
+| where InitiatingProcessFileName has "git"
+| where LocalIPType != "Loopback" and LocalIP != "127.0.0.1"
+| extend GitRepoUrl = extract_all(@"(https?://[^\s""']+)", InitiatingProcessCommandLine)
+| mv-expand GitRepoUrl to typeof(string)
+| project
+    TimeGenerated,
+    DeviceId,
+    DeviceName,
+    InitiatingProcessFileName,
+    LocalIP,
+    RemoteIP,
+    RemotePort,
+    GitRepoUrl
+| sort by TimeGenerated desc
+| where isnotempty(GitRepoUrl)
+//----------
+// GitHub example:
+| where GitRepoUrl startswith "https://github.com/microsoft"
+//| where GitRepoUrl startswith "https://gitlab.com/group"
+//| where GitRepoUrl startswith "https://dev.azure.com/org"
+//| where GitRepoUrl contains "git.internal.example"
+
+DeviceProcessEvents
+| where InitiatingProcessFileName has_any("git")
+| where InitiatingProcessCommandLine contains "https://"
+| extend GitRepoUrl = extract_all(@"(https?://[^\s""']+)", InitiatingProcessCommandLine)
+| mv-expand GitRepoUrl = GitRepoUrl to typeof(string)
+| extend GitRepoDomain = tostring(parse_url(GitRepoUrl).Host)
+| project
+    TimeGenerated,
+    DeviceName,
+    AccountName,
+    FileName,
+    InitiatingProcessParentFileName,
+    GitRepoDomain,
+    GitRepoUrl
+// Provider-specific examples:
+//| where GitRepoUrl startswith "https://github.com/microsoft"
+//| where GitRepoUrl startswith "https://gitlab.com/group"
+//| where GitRepoUrl startswith "https://dev.azure.com/org"
+| summarize count()
+    by bin(TimeGenerated, 1h),
+       DeviceName,
+       AccountName,
+       FileName,
+       GitRepoDomain,
+       tostring(GitRepoUrl)
+| sort by TimeGenerated desc

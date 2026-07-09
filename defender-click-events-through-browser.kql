@@ -1,3 +1,5 @@
+// https://pisinger.github.io/posts/defender-advanced-hunting-ai-url-clicks-git-repo-targets/
+
 // When a link is opened from outside the browser, Windows launches the default browser with the full URL as a command-line argument. 
 // This query extracts those URLs from InitiatingProcessCommandLine to surface link clicks that originate from any application
 // InitiatingProcessParentFileName provides click-source attribution: it identifies the application that triggered the browser launch 
