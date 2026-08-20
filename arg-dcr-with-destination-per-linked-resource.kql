@@ -1,0 +1,62 @@
+// simple query to check for dcr and its linked resources
+insightsresources
+| where type == 'microsoft.insights/datacollectionruleassociations'
+| extend lid = tolower(id)
+| extend targetId = substring(lid, 0, indexof(lid, '/providers/microsoft.insights/datacollectionruleassociations'))
+| extend dcrId = tolower(tostring(properties.dataCollectionRuleId))
+| where isnotempty(dcrId)
+| join kind=inner (
+    resources
+    | where type == 'microsoft.insights/datacollectionrules'
+    | project 
+		dcrId = tolower(id),
+        dcrName = name,
+        immutableId = tostring(properties.immutableId)
+) on dcrId
+| extend linkedResource = tostring(split(targetId, '/')[-1])
+| project dcrName, immutableId, linkedResource, targetId
+| sort by dcrName asc
+| summarize make_set(linkedResource) by immutableId, dcrName 
+| extend resourceCount = array_length(set_linkedResource)
+//| where set_linkedResource has_any("ps-vm01")
+
+// more advanced to also return streams and destinations
+resources
+| where type =~ 'microsoft.insights/datacollectionrules'
+| project 
+	dcrId = tolower(id), dcrName = name, dcrRg = resourceGroup, dcrSub = subscriptionId, 
+	dcrLocation = location, dcrKind = kind, props = properties, mi = tostring(identity.principalId)
+| extend
+	flowsStr = tostring(props.dataFlows), 
+	destStr  = tostring(props.destinations),
+	srcStr   = tostring(props.dataSources)
+| extend 
+	immutableId     = tostring(props.immutableId),
+    provisionedBy   = tostring(props.metadata.provisionedBy),
+    destKinds       = bag_keys(props.destinations),
+    // strict token class: excludes xPathQueries like "Microsoft-Windows-AppLocker/EXE and DLL!*"
+    declaredStreams = set_union(extract_all(@'"((?:Microsoft|Custom)-[A-Za-z0-9_\-]+)"', srcStr),   dynamic([])),
+    routedStreams   = set_union(extract_all(@'"((?:Microsoft|Custom)-[A-Za-z0-9_\-]+)"', flowsStr), dynamic([])),
+    workspaces      = set_union(extract_all(@'/workspaces/([^"/]+)',       destStr), dynamic([])),
+    eventHubs       = set_union(extract_all(@'/namespaces/([^"/]+)',       destStr), dynamic([])),
+    storage         = set_union(extract_all(@'/storageAccounts/([^"/]+)',  destStr), dynamic([])),
+    adx             = set_union(extract_all(@'/clusters/([^"/]+)',         destStr), dynamic([])),
+    hasTransform    = flowsStr contains 'transformKql'
+| extend unroutedStreams = set_difference(declaredStreams, routedStreams)
+| join kind=leftouter (
+    insightsresources
+    | where type =~ 'microsoft.insights/datacollectionruleassociations'
+    | extend lid = tolower(id)
+    | extend targetId = substring(lid, 0, indexof(lid, '/providers/microsoft.insights/datacollectionruleassociations'))
+    | extend dcrId = tolower(tostring(properties.dataCollectionRuleId))
+    | where isnotempty(dcrId)
+    | extend 
+		linkedResource = tostring(split(targetId, '/')[-1]),
+        targetType = strcat(tostring(split(targetId, '/')[6]), '/', tostring(split(targetId, '/')[7]))
+    | summarize linkedResources = make_set(linkedResource, 1000), targetTypes = make_set(targetType, 20), resourceCount = dcount(targetId) by dcrId
+) on dcrId
+| project dcrSub, dcrRg, dcrName, dcrLocation, mi, provisionedBy, destKinds, routedStreams, workspaces, hasTransform, linkedResources
+| extend 
+    resourceCount = array_length(linkedResources),
+    streamCount = array_length(routedStreams)
+//| where linkedResources has_any("ps-vm01")
