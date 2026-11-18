@@ -75,7 +75,10 @@ let DefenderAdmin = (lookback: timespan) {
     | project Timestamp, ReportId, Workload, Operation = ActionType, Actor, ActorUpn, ActorName, ActorKind,
         ActorObjectId, IPAddress, CountryCode, Details
 };
+DefenderAdmin(30d)
 ```
+
+> The above query can then be saved as a function in Defender XDR to make it reusable across different investigations and dashboards.
 
 `Actor` is the admin's UPN when the event names one or `IdentityInfo` can resolve the object ID to one, and the display name or app name otherwise. `ActorUpn` is only the UPN, `ActorName` is the display name or app name, and `ActorObjectId` is the Entra object ID. Applications have no UPN, so their `Actor` is the app name. `ActorKind` is `application` for an app, API client or Defender itself, `admin` for `UserType` 2 or 7, and `user` for `UserType = 0`. Treat it as a first filter, not a verdict. The same person shows up as `admin` on some operations and `user` on others: Defender for Identity events carry `UserType = 0` and the indicator events carry `UserType = 7`, for the same admin account. For that reason the behavior queries (14 and 15) filter on `ActorKind != "application"` and not on `admin`.
 
@@ -522,6 +525,13 @@ CloudAppEvents
 | join kind=leftouter names on $left.ActorObjectId == $right.AccountObjectId
 | mv-apply p = R.Parameters on (summarize Params = make_bag(bag_pack(tostring(p.Name), tostring(p.Value))))
 | extend Actor = coalesce(tolower(AccountUpn), tolower(iff(UserId contains "@", UserId, "")), AccountDisplayName, AccountDisplayName1, iff(UserId startswith "NT SERVICE", UserId, ""), ActorObjectId, UserId)
+| where not(
+    ActionType == "Set-AdminAuditLogConfig"
+    and tostring(R.ClientIP) startswith "[::1]"
+    and tostring(Params.AdminAuditLogEnabled) == "True"
+    and tostring(Params.Identity) contains "Microsoft Exchange Hosted Organizations"
+    and array_length(set_difference(bag_keys(Params), dynamic(["DomainController","IgnoreDehydratedFlag","Identity","AdminAuditLogEnabled"]))) == 0
+    )
 | project Timestamp, Cmdlet = ActionType, Object = coalesce(tostring(R.ObjectId), tostring(Params.Identity)), Actor,
     Result = tostring(R.ResultStatus), Parameters = tostring(Params)
 | order by Timestamp desc
